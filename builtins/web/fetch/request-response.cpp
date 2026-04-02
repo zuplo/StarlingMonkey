@@ -1323,6 +1323,36 @@ JSObject *Request::signal(JSObject *obj) {
   return &JS::GetReservedSlot(obj, static_cast<uint32_t>(Request::Slots::Signal)).toObject();
 }
 
+Request::RedirectMode Request::redirect_mode(JSObject *obj) {
+  MOZ_ASSERT(is_instance(obj));
+  return static_cast<RedirectMode>(
+      JS::GetReservedSlot(obj, std::to_underlying(Slots::Redirect)).toInt32());
+}
+
+bool Request::redirect_get(JSContext *cx, unsigned argc, JS::Value *vp) {
+  METHOD_HEADER(0)
+
+  const char *mode_str;
+  switch (redirect_mode(self)) {
+  case RedirectMode::Follow:
+    mode_str = "follow";
+    break;
+  case RedirectMode::Error:
+    mode_str = "error";
+    break;
+  case RedirectMode::Manual:
+    mode_str = "manual";
+    break;
+  }
+
+  JSString *str = JS_NewStringCopyZ(cx, mode_str);
+  if (!str) {
+    return false;
+  }
+  args.rval().setString(str);
+  return true;
+}
+
 bool Request::method_get(JSContext *cx, unsigned argc, JS::Value *vp) {
   METHOD_HEADER(0)
 
@@ -1415,6 +1445,8 @@ bool Request::clone(JSContext *cx, unsigned argc, JS::Value *vp) {
   SetReservedSlot(new_request, std::to_underlying(Slots::URL), url_val);
   Value method_val = JS::StringValue(method(self));
   SetReservedSlot(new_request, std::to_underlying(Slots::Method), method_val);
+  SetReservedSlot(new_request, std::to_underlying(Slots::Redirect),
+                  GetReservedSlot(self, std::to_underlying(Slots::Redirect)));
 
   // Assert: this's signal is non-null.
   MOZ_ASSERT(Request::signal(self));
@@ -1495,6 +1527,7 @@ const JSPropertySpec Request::properties[] = {
     JS_PSG("body", Request::body_get, JSPROP_ENUMERATE),
     JS_PSG("bodyUsed", Request::bodyUsed_get, JSPROP_ENUMERATE),
     JS_PSG("signal", Request::signal_get, JSPROP_ENUMERATE),
+    JS_PSG("redirect", Request::redirect_get, JSPROP_ENUMERATE),
     JS_STRING_SYM_PS(toStringTag, "Request", JSPROP_READONLY),
     JS_PS_END,
 };
@@ -1521,6 +1554,8 @@ void Request::init_slots(JSObject *requestInstance) {
   JS::SetReservedSlot(requestInstance, std::to_underlying(Slots::BodyUsed), JS::FalseValue());
   JS::SetReservedSlot(requestInstance, std::to_underlying(Slots::Method),
                       JS::StringValue(GET_atom));
+  JS::SetReservedSlot(requestInstance, std::to_underlying(Slots::Redirect),
+                      JS::Int32Value(static_cast<int32_t>(RedirectMode::Follow)));
 }
 
 /**
@@ -1592,7 +1627,11 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
       return false;
     }
 
-    // The following properties aren't applicable:
+    // redirect mode: `request`’s redirect mode.
+    JS::SetReservedSlot(request, std::to_underlying(Slots::Redirect),
+                        JS::GetReservedSlot(input_request, std::to_underlying(Slots::Redirect)));
+
+    // The following properties aren’t applicable:
     // unsafe-request flag: Set.
     // client: This’s relevant settings object.
     // window: `window`.
@@ -1601,7 +1640,6 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
     // referrer policy: `request`’s referrer policy.
     // mode: `request`’s mode.
     // credentials mode: `request`’s credentials mode.
-    // redirect mode: `request`’s redirect mode.
     // integrity metadata: `request`’s integrity metadata.
     // keepalive: `request`’s keepalive.
     // reload-navigation flag: `request`’s reload-navigation flag.
@@ -1658,6 +1696,7 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
   JS::RootedValue headers_val(cx);
   JS::RootedValue body_val(cx);
   JS::RootedValue signal_val(cx);
+  JS::RootedValue redirect_val(cx);
 
   bool is_get = true;
   bool is_get_or_head = is_get;
@@ -1669,7 +1708,8 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
     if (!JS_GetProperty(cx, init, "method", &method_val) ||
         !JS_GetProperty(cx, init, "headers", &headers_val) ||
         !JS_GetProperty(cx, init, "body", &body_val) ||
-        !JS_GetProperty(cx, init, "signal", &signal_val)) {
+        !JS_GetProperty(cx, init, "signal", &signal_val) ||
+        !JS_GetProperty(cx, init, "redirect", &redirect_val)) {
       return false;
     }
   } else if (!init_val.isNullOrUndefined()) {
@@ -1724,6 +1764,28 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
   //      "`same-origin`", then throw a TypeError.
   // 22.  If `init["redirect"]` exists, then set `request`’s redirect mode to
   // it.
+  if (!redirect_val.isUndefined()) {
+    auto redirect_str = core::encode(cx, redirect_val);
+    if (!redirect_str) {
+      return false;
+    }
+
+    RedirectMode mode;
+    if (strcmp(redirect_str.begin(), "follow") == 0) {
+      mode = RedirectMode::Follow;
+    } else if (strcmp(redirect_str.begin(), "error") == 0) {
+      mode = RedirectMode::Error;
+    } else if (strcmp(redirect_str.begin(), "manual") == 0) {
+      mode = RedirectMode::Manual;
+    } else {
+      api::throw_error(cx, FetchErrors::InvalidRedirectMode, redirect_str.begin());
+      return false;
+    }
+
+    JS::SetReservedSlot(request, std::to_underlying(Slots::Redirect),
+                        JS::Int32Value(static_cast<int32_t>(mode)));
+  }
+
   // 23.  If `init["integrity"]` exists, then set `request`’s integrity metadata
   // to it.
   // 24.  If `init["keepalive"]` exists, then set `request`’s keepalive to it.
@@ -2806,6 +2868,39 @@ bool ResponseFutureTask::run(api::Engine *engine) {
   RootedObject response_obj(cx, Response::create_incoming(cx, response));
   if (!response_obj) {
     return false;
+  }
+
+  // Check redirect mode and handle redirect responses accordingly.
+  uint16_t status = Response::status(response_obj);
+  bool is_redirect = (status == 301 || status == 302 || status == 303 ||
+                      status == 307 || status == 308);
+
+  if (is_redirect) {
+    auto redirect_mode = Request::redirect_mode(request);
+
+    if (redirect_mode == Request::RedirectMode::Error) {
+      // redirect: "error" - reject with a TypeError.
+      api::throw_error(cx, FetchErrors::FetchRedirectError);
+      return RejectPromiseWithPendingError(cx, response_promise);
+    }
+
+    if (redirect_mode == Request::RedirectMode::Manual) {
+      // redirect: "manual" - return an opaque-redirect filtered response.
+      // Set the response type to "opaqueredirect" and return the response as-is
+      // (the 3xx status, headers, etc. are preserved).
+      Response::set_type(response_obj, Response::Type::OpaqueRedirect);
+
+      RequestOrResponse::set_url(response_obj, RequestOrResponse::url(request));
+      RootedValue response_val(cx, ObjectValue(*response_obj));
+      if (!ResolvePromise(cx, response_promise, response_val)) {
+        return false;
+      }
+
+      return cancel(engine);
+    }
+
+    // redirect: "follow" - fall through to default behavior (the WASI HTTP
+    // layer already followed the redirect).
   }
 
   RootedObject signal(cx, Request::signal(request));
