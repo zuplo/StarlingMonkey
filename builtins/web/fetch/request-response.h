@@ -121,6 +121,7 @@ class Request final : public BuiltinImpl<Request> {
   static bool method_get(JSContext *cx, unsigned argc, JS::Value *vp);
   static bool headers_get(JSContext *cx, unsigned argc, JS::Value *vp);
   static bool url_get(JSContext *cx, unsigned argc, JS::Value *vp);
+  static bool redirect_get(JSContext *cx, unsigned argc, JS::Value *vp);
 
   template <RequestOrResponse::BodyReadResult result_type>
   static bool bodyAll(JSContext *cx, unsigned argc, JS::Value *vp);
@@ -146,12 +147,17 @@ public:
     ResponsePromise = 8,
     PendingResponseHandle = 9,
     Signal = 10,
-    Count = 11,
+    Redirect = 11,
+    Count = 12,
   };
+
+  // Redirect mode values matching the Fetch spec.
+  enum class RedirectMode : uint8_t { Follow, Error, Manual };
 
   static JSObject *response_promise(JSObject *obj);
   static JSString *method(JS::HandleObject obj);
   static JSObject *signal(JSObject *obj);
+  static RedirectMode redirect_mode(JSObject *obj);
 
   static const JSFunctionSpec static_methods[];
   static const JSPropertySpec static_properties[];
@@ -240,10 +246,14 @@ public:
 class ResponseFutureTask final : public api::AsyncTask {
   Heap<JSObject *> request_;
   host_api::FutureHttpIncomingResponse *future_;
+  uint32_t redirect_count_ = 0;
 
 public:
+  static constexpr uint32_t MAX_REDIRECTS = 20;
+
   explicit ResponseFutureTask(HandleObject request,
-                              host_api::FutureHttpIncomingResponse *future);
+                              host_api::FutureHttpIncomingResponse *future,
+                              uint32_t redirect_count = 0);
 
   [[nodiscard]] bool run(api::Engine *engine) override;
   [[nodiscard]] bool cancel(api::Engine *engine) override;

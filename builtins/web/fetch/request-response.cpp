@@ -1321,6 +1321,36 @@ JSObject *Request::signal(JSObject *obj) {
   return &JS::GetReservedSlot(obj, static_cast<uint32_t>(Request::Slots::Signal)).toObject();
 }
 
+Request::RedirectMode Request::redirect_mode(JSObject *obj) {
+  MOZ_ASSERT(is_instance(obj));
+  return static_cast<RedirectMode>(
+      JS::GetReservedSlot(obj, static_cast<uint32_t>(Slots::Redirect)).toInt32());
+}
+
+bool Request::redirect_get(JSContext *cx, unsigned argc, JS::Value *vp) {
+  METHOD_HEADER(0)
+
+  const char *mode_str;
+  switch (redirect_mode(self)) {
+  case RedirectMode::Follow:
+    mode_str = "follow";
+    break;
+  case RedirectMode::Error:
+    mode_str = "error";
+    break;
+  case RedirectMode::Manual:
+    mode_str = "manual";
+    break;
+  }
+
+  JSString *str = JS_NewStringCopyZ(cx, mode_str);
+  if (!str) {
+    return false;
+  }
+  args.rval().setString(str);
+  return true;
+}
+
 bool Request::method_get(JSContext *cx, unsigned argc, JS::Value *vp) {
   METHOD_HEADER(0)
 
@@ -1413,6 +1443,8 @@ bool Request::clone(JSContext *cx, unsigned argc, JS::Value *vp) {
   SetReservedSlot(new_request, static_cast<uint32_t>(Slots::URL), url_val);
   Value method_val = JS::StringValue(method(self));
   SetReservedSlot(new_request, static_cast<uint32_t>(Slots::Method), method_val);
+  SetReservedSlot(new_request, static_cast<uint32_t>(Slots::Redirect),
+                  GetReservedSlot(self, static_cast<uint32_t>(Slots::Redirect)));
 
   // Assert: this's signal is non-null.
   MOZ_ASSERT(Request::signal(self));
@@ -1493,6 +1525,7 @@ const JSPropertySpec Request::properties[] = {
     JS_PSG("body", Request::body_get, JSPROP_ENUMERATE),
     JS_PSG("bodyUsed", Request::bodyUsed_get, JSPROP_ENUMERATE),
     JS_PSG("signal", Request::signal_get, JSPROP_ENUMERATE),
+    JS_PSG("redirect", Request::redirect_get, JSPROP_ENUMERATE),
     JS_STRING_SYM_PS(toStringTag, "Request", JSPROP_READONLY),
     JS_PS_END,
 };
@@ -1519,6 +1552,8 @@ void Request::init_slots(JSObject *requestInstance) {
   JS::SetReservedSlot(requestInstance, static_cast<uint32_t>(Slots::BodyUsed), JS::FalseValue());
   JS::SetReservedSlot(requestInstance, static_cast<uint32_t>(Slots::Method),
                       JS::StringValue(GET_atom));
+  JS::SetReservedSlot(requestInstance, static_cast<uint32_t>(Slots::Redirect),
+                      JS::Int32Value(static_cast<int32_t>(RedirectMode::Follow)));
 }
 
 /**
@@ -1590,7 +1625,11 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
       return false;
     }
 
-    // The following properties aren't applicable:
+    // redirect mode: `request`’s redirect mode.
+    JS::SetReservedSlot(request, static_cast<uint32_t>(Slots::Redirect),
+                        JS::GetReservedSlot(input_request, static_cast<uint32_t>(Slots::Redirect)));
+
+    // The following properties aren’t applicable:
     // unsafe-request flag: Set.
     // client: This’s relevant settings object.
     // window: `window`.
@@ -1599,7 +1638,6 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
     // referrer policy: `request`’s referrer policy.
     // mode: `request`’s mode.
     // credentials mode: `request`’s credentials mode.
-    // redirect mode: `request`’s redirect mode.
     // integrity metadata: `request`’s integrity metadata.
     // keepalive: `request`’s keepalive.
     // reload-navigation flag: `request`’s reload-navigation flag.
@@ -1656,6 +1694,7 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
   JS::RootedValue headers_val(cx);
   JS::RootedValue body_val(cx);
   JS::RootedValue signal_val(cx);
+  JS::RootedValue redirect_val(cx);
 
   bool is_get = true;
   bool is_get_or_head = is_get;
@@ -1667,7 +1706,8 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
     if (!JS_GetProperty(cx, init, "method", &method_val) ||
         !JS_GetProperty(cx, init, "headers", &headers_val) ||
         !JS_GetProperty(cx, init, "body", &body_val) ||
-        !JS_GetProperty(cx, init, "signal", &signal_val)) {
+        !JS_GetProperty(cx, init, "signal", &signal_val) ||
+        !JS_GetProperty(cx, init, "redirect", &redirect_val)) {
       return false;
     }
   } else if (!init_val.isNullOrUndefined()) {
@@ -1722,6 +1762,28 @@ bool Request::initialize(JSContext *cx, JS::HandleObject request, JS::HandleValu
   //      "`same-origin`", then throw a TypeError.
   // 22.  If `init["redirect"]` exists, then set `request`’s redirect mode to
   // it.
+  if (!redirect_val.isUndefined()) {
+    auto redirect_str = core::encode(cx, redirect_val);
+    if (!redirect_str) {
+      return false;
+    }
+
+    RedirectMode mode;
+    if (strcmp(redirect_str.begin(), "follow") == 0) {
+      mode = RedirectMode::Follow;
+    } else if (strcmp(redirect_str.begin(), "error") == 0) {
+      mode = RedirectMode::Error;
+    } else if (strcmp(redirect_str.begin(), "manual") == 0) {
+      mode = RedirectMode::Manual;
+    } else {
+      api::throw_error(cx, FetchErrors::InvalidRedirectMode, redirect_str.begin());
+      return false;
+    }
+
+    JS::SetReservedSlot(request, static_cast<uint32_t>(Slots::Redirect),
+                        JS::Int32Value(static_cast<int32_t>(mode)));
+  }
+
   // 23.  If `init["integrity"]` exists, then set `request`’s integrity metadata
   // to it.
   // 24.  If `init["keepalive"]` exists, then set `request`’s keepalive to it.
@@ -2774,8 +2836,10 @@ struct ResponseAborter : abort::AbortAlgorithm {
   }
 };
 
-ResponseFutureTask::ResponseFutureTask(const HandleObject request, host_api::FutureHttpIncomingResponse *future)
-      : request_(request), future_(future) {
+ResponseFutureTask::ResponseFutureTask(const HandleObject request,
+                                       host_api::FutureHttpIncomingResponse *future,
+                                       uint32_t redirect_count)
+      : request_(request), future_(future), redirect_count_(redirect_count) {
     auto res = future->subscribe();
 
     MOZ_ASSERT(!res.is_err(), "Subscribing to a future should never fail");
@@ -2801,15 +2865,218 @@ bool ResponseFutureTask::run(api::Engine *engine) {
   }
 
   auto *response = maybe_response.value();
+
+  // Get the status before creating the JS response object, so we can decide
+  // whether to follow a redirect without creating unnecessary JS objects.
+  auto status_res = response->status();
+  MOZ_ASSERT(!status_res.is_err(), "TODO: proper error handling");
+  auto status = status_res.unwrap();
+
+  bool is_redirect = (status == 301 || status == 302 || status == 303 ||
+                      status == 307 || status == 308);
+
+  if (is_redirect) {
+    auto redirect_mode = Request::redirect_mode(request);
+
+    if (redirect_mode == Request::RedirectMode::Follow) {
+      // redirect: "follow" - follow the redirect by making a new request.
+      if (redirect_count_ >= MAX_REDIRECTS) {
+        // Clean up the response before rejecting.
+        auto body_res = response->body();
+        if (!body_res.is_err()) {
+          body_res.unwrap()->close();
+        }
+        delete response;
+
+        api::throw_error(cx, FetchErrors::FetchRedirectLimit);
+        return RejectPromiseWithPendingError(cx, response_promise);
+      }
+
+      // 1. Extract the Location header from the response.
+      auto headers_res = response->headers();
+      MOZ_ASSERT(!headers_res.is_err());
+      auto *resp_headers = headers_res.unwrap();
+
+      auto location_res = resp_headers->get("location");
+      if (location_res.is_err() || !location_res.unwrap().has_value() ||
+          location_res.unwrap().value().empty()) {
+        // Clean up the response before rejecting.
+        auto body_res = response->body();
+        if (!body_res.is_err()) {
+          body_res.unwrap()->close();
+        }
+        delete response;
+
+        api::throw_error(cx, FetchErrors::FetchRedirectNoLocation);
+        return RejectPromiseWithPendingError(cx, response_promise);
+      }
+
+      auto &location_values = location_res.unwrap().value();
+      std::string_view location_str(location_values[0].ptr.get(), location_values[0].len);
+
+      // 2. Resolve the Location URL relative to the request URL.
+      RootedValue request_url_val(cx, RequestOrResponse::url(request));
+      host_api::HostString request_url_str = core::encode(cx, request_url_val);
+      if (!request_url_str.ptr) {
+        auto body_res = response->body();
+        if (!body_res.is_err()) {
+          body_res.unwrap()->close();
+        }
+        delete response;
+        return false;
+      }
+
+      jsurl::SpecString base_spec(reinterpret_cast<uint8_t *>(request_url_str.ptr.get()),
+                                  request_url_str.len, request_url_str.len);
+      jsurl::JSUrl *base_url = jsurl::new_jsurl(&base_spec);
+      if (!base_url) {
+        auto body_res = response->body();
+        if (!body_res.is_err()) {
+          body_res.unwrap()->close();
+        }
+        delete response;
+
+        api::throw_error(cx, FetchErrors::FetchRedirectInvalidLocation);
+        return RejectPromiseWithPendingError(cx, response_promise);
+      }
+
+      jsurl::SpecString location_spec(
+          reinterpret_cast<uint8_t *>(const_cast<char *>(location_str.data())),
+          location_str.size(), location_str.size());
+      jsurl::JSUrl *resolved_url = jsurl::new_jsurl_with_base(&location_spec, base_url);
+      jsurl::free_jsurl(base_url);
+
+      if (!resolved_url) {
+        auto body_res = response->body();
+        if (!body_res.is_err()) {
+          body_res.unwrap()->close();
+        }
+        delete response;
+
+        api::throw_error(cx, FetchErrors::FetchRedirectInvalidLocation);
+        return RejectPromiseWithPendingError(cx, response_promise);
+      }
+
+      jsurl::SpecSlice resolved_href = jsurl::href(resolved_url);
+      std::string resolved_url_str(reinterpret_cast<const char *>(resolved_href.data),
+                                   resolved_href.len);
+      jsurl::free_jsurl(resolved_url);
+
+      // 3. CRITICAL: Close the incoming response body BEFORE discarding it.
+      // The response body stream is backed by a native WASI handle. If we
+      // don't explicitly close it before dropping the response, the handle
+      // remains in an indeterminate state and causes "detached ArrayBuffer"
+      // errors when the GC later tries to finalize related objects.
+      {
+        auto body_res = response->body();
+        if (!body_res.is_err()) {
+          auto *body = body_res.unwrap();
+          body->close();
+        }
+      }
+      // Now delete the response to release the native WASI response handle.
+      delete response;
+
+      // 4. Determine the method for the redirected request.
+      RootedString method_js(cx, Request::method(request));
+      host_api::HostString method_hs = core::encode(cx, method_js);
+      if (!method_hs.ptr) {
+        return false;
+      }
+
+      std::string new_method(method_hs.ptr.get(), method_hs.len);
+
+      // Per Fetch spec:
+      // - 303: always change to GET, drop body
+      // - 301, 302: change to GET if method is not GET or HEAD, drop body
+      // - 307, 308: preserve method and body
+      if (status == 303) {
+        new_method = "GET";
+      } else if (status == 301 || status == 302) {
+        if (new_method != "GET" && new_method != "HEAD") {
+          new_method = "GET";
+        }
+      }
+
+      // 5. Clone headers from the original request for the new request.
+      unique_ptr<host_api::HttpHeaders> new_headers =
+          RequestOrResponse::headers_handle_clone(cx, request);
+      if (!new_headers) {
+        return false;
+      }
+
+      // 6. Create and send the new outgoing request.
+      host_api::HostString new_url{resolved_url_str};
+
+      auto *new_request = host_api::HttpOutgoingRequest::make(
+          new_method, std::move(new_url), std::move(new_headers));
+      MOZ_RELEASE_ASSERT(new_request);
+
+      auto send_res = new_request->send();
+      if (const auto *err = send_res.to_err()) {
+        HANDLE_ERROR(cx, *err);
+        return RejectPromiseWithPendingError(cx, response_promise);
+      }
+
+      auto *pending_handle = send_res.unwrap();
+
+      // 7. Update the request object's URL to the new location.
+      RootedString new_url_js(
+          cx, JS_NewStringCopyN(cx, resolved_url_str.c_str(), resolved_url_str.size()));
+      if (!new_url_js) {
+        return false;
+      }
+      RootedValue new_url_val(cx, StringValue(new_url_js));
+      RequestOrResponse::set_url(request, new_url_val);
+
+      // Store the new pending handle on the request.
+      SetReservedSlot(request, static_cast<uint32_t>(Request::Slots::PendingResponseHandle),
+                      PrivateValue(pending_handle));
+
+      // 8. Queue a new ResponseFutureTask for the redirected request.
+      auto task = js::MakeUnique<ResponseFutureTask>(request, pending_handle,
+                                                     redirect_count_ + 1);
+      engine->queue_async_task(task.release());
+
+      return cancel(engine);
+    }
+
+    if (redirect_mode == Request::RedirectMode::Error) {
+      // Clean up the response before rejecting.
+      auto body_res = response->body();
+      if (!body_res.is_err()) {
+        body_res.unwrap()->close();
+      }
+      delete response;
+
+      api::throw_error(cx, FetchErrors::FetchRedirectError);
+      return RejectPromiseWithPendingError(cx, response_promise);
+    }
+
+    // redirect: "manual" - return an opaque-redirect filtered response.
+    // Fall through to create the JS response object below.
+  }
+
   RootedObject response_obj(cx, Response::create_incoming(cx, response));
   if (!response_obj) {
     return false;
+  }
+
+  // For manual redirect mode, set the response type to opaqueredirect.
+  if (is_redirect && Request::redirect_mode(request) == Request::RedirectMode::Manual) {
+    Response::set_type(response_obj, Response::Type::OpaqueRedirect);
   }
 
   RootedObject signal(cx, Request::signal(request));
   if (AbortSignal::is_instance(signal)) {
     auto algorithm = js::MakeUnique<ResponseAborter>(response_promise, response_obj, signal);
     AbortSignal::add_algorithm(signal, std::move(algorithm));
+  }
+
+  // Set response.redirected = true if any redirects were followed.
+  if (redirect_count_ > 0) {
+    JS::SetReservedSlot(response_obj, static_cast<uint32_t>(Response::Slots::Redirected),
+                        JS::TrueValue());
   }
 
   RequestOrResponse::set_url(response_obj, RequestOrResponse::url(request));
