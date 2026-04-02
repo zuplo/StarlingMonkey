@@ -887,14 +887,14 @@ JSObject *CryptoKey::createEd25519(JSContext *cx, CryptoAlgorithmEd25519_Import 
     return nullptr;
   }
 
-  JS::SetReservedSlot(instance, std::to_underlying(Slots::Algorithm), JS::ObjectValue(*alg));
-  JS::SetReservedSlot(instance, std::to_underlying(Slots::Type),
+  JS::SetReservedSlot(instance, static_cast<uint32_t>(Slots::Algorithm), JS::ObjectValue(*alg));
+  JS::SetReservedSlot(instance, static_cast<uint32_t>(Slots::Type),
                        JS::Int32Value(static_cast<uint8_t>(keyType)));
-  JS::SetReservedSlot(instance, std::to_underlying(Slots::Extractable),
+  JS::SetReservedSlot(instance, static_cast<uint32_t>(Slots::Extractable),
                        JS::BooleanValue(extractable));
-  JS::SetReservedSlot(instance, std::to_underlying(Slots::Usages),
+  JS::SetReservedSlot(instance, static_cast<uint32_t>(Slots::Usages),
                        JS::Int32Value(usages.toInt()));
-  JS::SetReservedSlot(instance, std::to_underlying(Slots::Key), JS::PrivateValue(pkey));
+  JS::SetReservedSlot(instance, static_cast<uint32_t>(Slots::Key), JS::PrivateValue(pkey));
   return instance;
 }
 
