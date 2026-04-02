@@ -1,0 +1,63 @@
+name: Build ComponentizeJS Embedding
+
+on:
+  push:
+    branches: ['zuplo/*']
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-embedding:
+    name: Build Embedding (${{ matrix.build-type }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build-type: [release]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable
+          rustup target add wasm32-wasip1
+
+      - name: Install wasm-tools and wasm-opt
+        run: |
+          cargo install wasm-tools
+          cargo install wasm-opt
+
+      - name: Clone ComponentizeJS v0.19.3
+        run: |
+          git clone --depth 1 --branch 0.19.3 https://github.com/bytecodealliance/ComponentizeJS.git /tmp/componentize-js
+
+      - name: Fix include path for external StarlingMonkey
+        run: |
+          sed -i 's|include_directories("StarlingMonkey")|include_directories(${STARLINGMONKEY_SRC})|' /tmp/componentize-js/CMakeLists.txt
+
+      - name: Configure CMake
+        env:
+          STARLINGMONKEY_SRC: ${{ github.workspace }}
+          HOST_API: wasi-0.2.3
+        run: |
+          cd /tmp/componentize-js
+          cmake -B build-release -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build embedding
+        run: |
+          cd /tmp/componentize-js
+          make -j$(nproc) -C build-release starlingmonkey_embedding
+
+      - name: Verify output
+        run: |
+          ls -la /tmp/componentize-js/lib/starlingmonkey_embedding.wasm
+          wasm-tools print /tmp/componentize-js/lib/starlingmonkey_embedding.wasm 2>/dev/null | head -5 || true
+
+      - name: Upload embedding artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: starlingmonkey-embedding-${{ matrix.build-type }}
+          path: /tmp/componentize-js/lib/starlingmonkey_embedding.wasm
+          retention-days: 90
