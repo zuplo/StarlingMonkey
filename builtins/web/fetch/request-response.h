@@ -121,6 +121,7 @@ class Request final : public BuiltinImpl<Request> {
   static bool method_get(JSContext *cx, unsigned argc, JS::Value *vp);
   static bool headers_get(JSContext *cx, unsigned argc, JS::Value *vp);
   static bool url_get(JSContext *cx, unsigned argc, JS::Value *vp);
+  static bool redirect_get(JSContext *cx, unsigned argc, JS::Value *vp);
 
   template <RequestOrResponse::BodyReadResult result_type>
   static bool bodyAll(JSContext *cx, unsigned argc, JS::Value *vp);
@@ -146,12 +147,17 @@ public:
     ResponsePromise = 8,
     PendingResponseHandle = 9,
     Signal = 10,
-    Count = 11,
+    Redirect = 11,
+    Count = 12,
   };
+
+  // Redirect mode values matching the Fetch spec.
+  enum class RedirectMode : uint8_t { Follow, Error, Manual };
 
   static JSObject *response_promise(JSObject *obj);
   static JSString *method(JS::HandleObject obj);
   static JSObject *signal(JSObject *obj);
+  static RedirectMode redirect_mode(JSObject *obj);
 
   static const JSFunctionSpec static_methods[];
   static const JSPropertySpec static_properties[];

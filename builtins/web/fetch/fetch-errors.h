@@ -24,6 +24,8 @@ DEF_ERR(HeadersImmutable, JSEXN_TYPEERR, "{0}: Headers are immutable", 1)
 DEF_ERR(InvalidFormDataHeader, JSEXN_TYPEERR, "Invalid header for FormData body type", 0)
 DEF_ERR(InvalidFormData, JSEXN_TYPEERR, "FormData parsing failed", 0)
 DEF_ERR(InvalidSignal, JSEXN_TYPEERR, "Invalid AbortSignal provided", 0)
+DEF_ERR(InvalidRedirectMode, JSEXN_TYPEERR, "Request constructor: Invalid redirect mode \"{0}\"", 1)
+DEF_ERR(FetchRedirectError, JSEXN_TYPEERR, "NetworkError when attempting to fetch resource: redirect mode is set to \"error\"", 0)
 };     // namespace FetchErrors
 
 #endif // FETCH_ERRORS_H
