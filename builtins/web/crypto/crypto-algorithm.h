@@ -33,7 +33,8 @@ enum class CryptoAlgorithmIdentifier : uint8_t {
   SHA_384,
   SHA_512,
   HKDF,
-  PBKDF2
+  PBKDF2,
+  Ed25519
 };
 
 enum class NamedCurve : uint8_t {
@@ -204,6 +205,31 @@ public:
   JSObject *importKey(JSContext *cx, CryptoKeyFormat format, KeyData key_data, bool extractable,
                       CryptoKeyUsages usages) override;
   JSObject *toObject(JSContext *cx);
+};
+
+class CryptoAlgorithmEd25519_Sign_Verify final : public CryptoAlgorithmSignVerify {
+public:
+  [[nodiscard]] const char *name() const noexcept override { return "Ed25519"; };
+  CryptoAlgorithmEd25519_Sign_Verify() = default;
+  CryptoAlgorithmIdentifier identifier() final { return CryptoAlgorithmIdentifier::Ed25519; };
+
+  JSObject *sign(JSContext *cx, JS::HandleObject key, std::span<uint8_t> data) override;
+  JS::Result<bool> verify(JSContext *cx, JS::HandleObject key, std::span<uint8_t> signature,
+                          std::span<uint8_t> data) override;
+};
+
+class CryptoAlgorithmEd25519_Import final : public CryptoAlgorithmImportKey {
+public:
+  [[nodiscard]] const char *name() const noexcept override { return "Ed25519"; };
+  CryptoAlgorithmEd25519_Import() = default;
+
+  CryptoAlgorithmIdentifier identifier() final { return CryptoAlgorithmIdentifier::Ed25519; };
+
+  JSObject *importKey(JSContext *cx, CryptoKeyFormat format, JS::HandleValue key_data, bool extractable,
+                      CryptoKeyUsages usages) override;
+  JSObject *importKey(JSContext *cx, CryptoKeyFormat format, KeyData key_data, bool extractable,
+                      CryptoKeyUsages usages) override;
+  JSObject *toObject(JSContext *cx) const;
 };
 
 class CryptoAlgorithmDigest : public CryptoAlgorithm {
