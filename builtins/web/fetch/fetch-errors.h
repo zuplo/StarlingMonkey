@@ -26,6 +26,9 @@ DEF_ERR(InvalidFormData, JSEXN_TYPEERR, "FormData parsing failed", 0)
 DEF_ERR(InvalidSignal, JSEXN_TYPEERR, "Invalid AbortSignal provided", 0)
 DEF_ERR(InvalidRedirectMode, JSEXN_TYPEERR, "Request constructor: Invalid redirect mode \"{0}\"", 1)
 DEF_ERR(FetchRedirectError, JSEXN_TYPEERR, "NetworkError when attempting to fetch resource: redirect mode is set to \"error\"", 0)
+DEF_ERR(FetchRedirectLimit, JSEXN_TYPEERR, "NetworkError when attempting to fetch resource: too many redirects", 0)
+DEF_ERR(FetchRedirectNoLocation, JSEXN_TYPEERR, "NetworkError when attempting to fetch resource: redirect has no Location header", 0)
+DEF_ERR(FetchRedirectInvalidLocation, JSEXN_TYPEERR, "NetworkError when attempting to fetch resource: redirect Location is not a valid URL", 0)
 };     // namespace FetchErrors
 
 #endif // FETCH_ERRORS_H

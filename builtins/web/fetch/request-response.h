@@ -246,10 +246,14 @@ public:
 class ResponseFutureTask final : public api::AsyncTask {
   Heap<JSObject *> request_;
   host_api::FutureHttpIncomingResponse *future_;
+  uint32_t redirect_count_ = 0;
 
 public:
+  static constexpr uint32_t MAX_REDIRECTS = 20;
+
   explicit ResponseFutureTask(HandleObject request,
-                              host_api::FutureHttpIncomingResponse *future);
+                              host_api::FutureHttpIncomingResponse *future,
+                              uint32_t redirect_count = 0);
 
   [[nodiscard]] bool run(api::Engine *engine) override;
   [[nodiscard]] bool cancel(api::Engine *engine) override;
