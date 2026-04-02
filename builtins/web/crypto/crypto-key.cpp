@@ -867,6 +867,37 @@ bool CryptoKey::canVerify(JS::HandleObject self) {
   return usage.canVerify();
 }
 
+JSObject *CryptoKey::createEd25519(JSContext *cx, CryptoAlgorithmEd25519_Import *algorithm,
+                                    EVP_PKEY *pkey, CryptoKeyType keyType, bool extractable,
+                                    CryptoKeyUsages usages) {
+  MOZ_ASSERT(cx);
+  MOZ_ASSERT(algorithm);
+  MOZ_ASSERT(pkey);
+
+  JS::RootedObject instance(
+      cx, JS_NewObjectWithGivenProto(cx, &CryptoKey::class_, CryptoKey::proto_obj));
+  if (!instance) {
+    EVP_PKEY_free(pkey);
+    return nullptr;
+  }
+
+  JS::RootedObject alg(cx, algorithm->toObject(cx));
+  if (!alg) {
+    EVP_PKEY_free(pkey);
+    return nullptr;
+  }
+
+  JS::SetReservedSlot(instance, std::to_underlying(Slots::Algorithm), JS::ObjectValue(*alg));
+  JS::SetReservedSlot(instance, std::to_underlying(Slots::Type),
+                       JS::Int32Value(static_cast<uint8_t>(keyType)));
+  JS::SetReservedSlot(instance, std::to_underlying(Slots::Extractable),
+                       JS::BooleanValue(extractable));
+  JS::SetReservedSlot(instance, std::to_underlying(Slots::Usages),
+                       JS::Int32Value(usages.toInt()));
+  JS::SetReservedSlot(instance, std::to_underlying(Slots::Key), JS::PrivateValue(pkey));
+  return instance;
+}
+
 } // namespace builtins::web::crypto
 
 

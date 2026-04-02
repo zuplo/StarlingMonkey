@@ -548,6 +548,9 @@ JS::Result<CryptoAlgorithmIdentifier> normalizeIdentifier(JSContext *cx, JS::Han
   if (algorithm == "PBKDF2") {
     return CryptoAlgorithmIdentifier::PBKDF2;
   }
+  if (algorithm == "ED25519") {
+    return CryptoAlgorithmIdentifier::Ed25519;
+  }
 
   // Otherwise: Return a new NotSupportedError and terminate this algorithm.
   DOMException::raise(cx, "Algorithm: Unrecognized name", "NotSupportedError");
@@ -624,6 +627,9 @@ const char *algorithmName(CryptoAlgorithmIdentifier algorithm) {
   }
   case CryptoAlgorithmIdentifier::PBKDF2: {
     return "PBKDF2";
+  }
+  case CryptoAlgorithmIdentifier::Ed25519: {
+    return "Ed25519";
   }
   default: {
     MOZ_ASSERT_UNREACHABLE("Unknown `CryptoAlgorithmIdentifier` value");
@@ -727,6 +733,9 @@ CryptoAlgorithmSignVerify::normalize(JSContext *cx, JS::HandleValue value) {
   }
   case CryptoAlgorithmIdentifier::ECDSA: {
     return CryptoAlgorithmECDSA_Sign_Verify::fromParameters(cx, params);
+  }
+  case CryptoAlgorithmIdentifier::Ed25519: {
+    return std::make_unique<CryptoAlgorithmEd25519_Sign_Verify>();
   }
   case CryptoAlgorithmIdentifier::RSA_PSS: {
     MOZ_ASSERT(false);
@@ -1199,6 +1208,9 @@ CryptoAlgorithmImportKey::normalize(JSContext *cx, JS::HandleValue value) {
   }
   case CryptoAlgorithmIdentifier::ECDSA: {
     return CryptoAlgorithmECDSA_Import::fromParameters(cx, params);
+  }
+  case CryptoAlgorithmIdentifier::Ed25519: {
+    return std::make_unique<CryptoAlgorithmEd25519_Import>();
   }
   case CryptoAlgorithmIdentifier::RSA_PSS:
   case CryptoAlgorithmIdentifier::RSA_OAEP:
@@ -2339,6 +2351,372 @@ JSObject *CryptoAlgorithmSHA384::digest(JSContext *cx, std::span<uint8_t> data) 
 }
 JSObject *CryptoAlgorithmSHA512::digest(JSContext *cx, std::span<uint8_t> data) {
   return builtins::web::crypto::digest(cx, data, EVP_sha512(), SHA512_DIGEST_LENGTH);
+}
+
+// ============================================================================
+// Ed25519 Sign/Verify
+// ============================================================================
+
+JSObject *CryptoAlgorithmEd25519_Sign_Verify::sign(JSContext *cx, JS::HandleObject key,
+                                                    std::span<uint8_t> data) {
+  MOZ_ASSERT(CryptoKey::is_instance(key));
+
+  // 1. If the [[type]] internal slot of key is not "private", then throw an InvalidAccessError.
+  if (CryptoKey::type(key) != CryptoKeyType::Private) {
+    DOMException::raise(cx, "InvalidAccessError", "InvalidAccessError");
+    return nullptr;
+  }
+
+  EVP_PKEY *pkey = CryptoKey::key(key);
+  if (!pkey) {
+    DOMException::raise(cx, "SubtleCrypto.sign: failed to sign", "OperationError");
+    return nullptr;
+  }
+
+  // Ed25519 uses EVP_DigestSign (one-shot, no separate digest step)
+  EvpMdCtxPtr ctx(EVP_MD_CTX_new());
+  if (!ctx) {
+    DOMException::raise(cx, "SubtleCrypto.sign: failed to sign", "OperationError");
+    return nullptr;
+  }
+
+  if (EVP_DigestSignInit(ctx.get(), nullptr, nullptr, nullptr, pkey) <= 0) {
+    DOMException::raise(cx, "SubtleCrypto.sign: failed to sign", "OperationError");
+    return nullptr;
+  }
+
+  // Determine signature length
+  size_t sig_len = 0;
+  if (EVP_DigestSign(ctx.get(), nullptr, &sig_len, data.data(), data.size()) <= 0) {
+    DOMException::raise(cx, "SubtleCrypto.sign: failed to sign", "OperationError");
+    return nullptr;
+  }
+
+  mozilla::UniquePtr<uint8_t[], JS::FreePolicy> sig_buf{
+      static_cast<uint8_t *>(JS_malloc(cx, sig_len))};
+  if (!sig_buf) {
+    JS_ReportOutOfMemory(cx);
+    return nullptr;
+  }
+
+  if (EVP_DigestSign(ctx.get(), sig_buf.get(), &sig_len, data.data(), data.size()) <= 0) {
+    DOMException::raise(cx, "SubtleCrypto.sign: failed to sign", "OperationError");
+    return nullptr;
+  }
+
+  // Return a new ArrayBuffer containing the signature
+  JS::RootedObject buffer(cx, JS::NewArrayBufferWithContents(
+      cx, sig_len, sig_buf.get(), JS::NewArrayBufferOutOfMemory::CallerMustFreeMemory));
+  if (!buffer) {
+    if (!JS_IsExceptionPending(cx)) {
+      js::ReportOutOfMemory(cx);
+    }
+    return nullptr;
+  }
+
+  // `buffer` now owns `sig_buf`
+  static_cast<void>(sig_buf.release());
+  return buffer;
+}
+
+JS::Result<bool> CryptoAlgorithmEd25519_Sign_Verify::verify(JSContext *cx, JS::HandleObject key,
+                                                             std::span<uint8_t> signature,
+                                                             std::span<uint8_t> data) {
+  MOZ_ASSERT(CryptoKey::is_instance(key));
+
+  // 1. If the [[type]] internal slot of key is not "public", then throw an InvalidAccessError.
+  if (CryptoKey::type(key) != CryptoKeyType::Public) {
+    DOMException::raise(cx, "InvalidAccessError", "InvalidAccessError");
+    return JS::Result<bool>(JS::Error());
+  }
+
+  EVP_PKEY *pkey = CryptoKey::key(key);
+  if (!pkey) {
+    DOMException::raise(cx, "SubtleCrypto.verify: failed to verify", "OperationError");
+    return JS::Result<bool>(JS::Error());
+  }
+
+  // Ed25519 signatures are always 64 bytes
+  if (signature.size() != 64) {
+    return false;
+  }
+
+  // Ed25519 uses EVP_DigestVerify (one-shot, no separate digest step)
+  EvpMdCtxPtr ctx(EVP_MD_CTX_new());
+  if (!ctx) {
+    DOMException::raise(cx, "SubtleCrypto.verify: failed to verify", "OperationError");
+    return JS::Result<bool>(JS::Error());
+  }
+
+  if (EVP_DigestVerifyInit(ctx.get(), nullptr, nullptr, nullptr, pkey) <= 0) {
+    DOMException::raise(cx, "SubtleCrypto.verify: failed to verify", "OperationError");
+    return JS::Result<bool>(JS::Error());
+  }
+
+  int ret = EVP_DigestVerify(ctx.get(), signature.data(), signature.size(),
+                              data.data(), data.size());
+
+  return ret == 1;
+}
+
+// ============================================================================
+// Ed25519 Import
+// ============================================================================
+
+JSObject *CryptoAlgorithmEd25519_Import::importKey(JSContext *cx, CryptoKeyFormat format,
+                                                    KeyData key_data, bool extractable,
+                                                    CryptoKeyUsages usages) {
+  MOZ_ASSERT(cx);
+
+  switch (format) {
+  case CryptoKeyFormat::Jwk: {
+    auto *jwk = std::get<JsonWebKey *>(key_data);
+    if (!jwk) {
+      DOMException::raise(cx, "Supplied keyData is not a JSONWebKey", "DataError");
+      return nullptr;
+    }
+
+    // Validate kty is "OKP" (already done in the HandleValue overload)
+    // Validate crv is "Ed25519"
+    if (!jwk->crv.has_value() || jwk->crv.value() != "Ed25519") {
+      DOMException::raise(cx, "The JWK's \"crv\" member must be \"Ed25519\"", "DataError");
+      return nullptr;
+    }
+
+    // If the "d" field is present, this is a private key
+    bool is_private = jwk->d.has_value();
+
+    // Validate usages
+    if (is_private && !usages.isEmpty() && !usages.canOnlySign()) {
+      DOMException::raise(cx, "Ed25519 private keys only support 'sign' operations", "SyntaxError");
+      return nullptr;
+    }
+    if (!is_private && !usages.isEmpty() && !usages.canOnlyVerify()) {
+      DOMException::raise(cx, "Ed25519 public keys only support 'verify' operations", "SyntaxError");
+      return nullptr;
+    }
+
+    // Validate use field
+    if (!usages.isEmpty() && jwk->use.has_value() && jwk->use.value() != "sig") {
+      DOMException::raise(cx, "Operation not permitted", "DataError");
+      return nullptr;
+    }
+
+    // Validate key_ops
+    if (!jwk->key_ops.empty()) {
+      auto ops = CryptoKeyUsages::from(jwk->key_ops);
+      if (!ops.isSuperSetOf(usages)) {
+        DOMException::raise(cx,
+                            "The JWK 'key_ops' member was inconsistent with that specified by the "
+                            "Web Crypto call. The JWK usage must be a superset of those requested",
+                            "DataError");
+        return nullptr;
+      }
+    }
+
+    // Validate ext
+    if (jwk->ext && !jwk->ext.value() && extractable) {
+      DOMException::raise(cx, "Data provided to an operation does not meet requirements",
+                          "DataError");
+      return nullptr;
+    }
+
+    // Validate alg if present
+    if (jwk->alg.has_value() && jwk->alg.value() != "EdDSA") {
+      DOMException::raise(cx, "The JWK's \"alg\" member must be \"EdDSA\" for Ed25519 keys",
+                          "DataError");
+      return nullptr;
+    }
+
+    // x is required for both public and private keys
+    if (!jwk->x.has_value()) {
+      DOMException::raise(cx, "The JWK's \"x\" member is required for Ed25519 keys", "DataError");
+      return nullptr;
+    }
+
+    // Decode the public key (x)
+    auto xResult =
+        base64::forgivingBase64Decode(jwk->x.value(), base64::base64URLDecodeTable);
+    if (xResult.isErr()) {
+      DOMException::raise(
+          cx, "The JWK member 'x' could not be base64url decoded or contained padding",
+          "DataError");
+      return nullptr;
+    }
+    auto x = xResult.unwrap();
+
+    // Ed25519 public key must be 32 bytes
+    if (x.length() != 32) {
+      auto message = fmt::format(
+          "The JWK's \"x\" member defines an octet string of length {} bytes but should be 32",
+          x.length());
+      DOMException::raise(cx, message, "DataError");
+      return nullptr;
+    }
+
+    EVP_PKEY *pkey = nullptr;
+
+    if (is_private) {
+      // Decode private key (d)
+      auto dResult =
+          base64::forgivingBase64Decode(jwk->d.value(), base64::base64URLDecodeTable);
+      if (dResult.isErr()) {
+        DOMException::raise(
+            cx, "The JWK member 'd' could not be base64url decoded or contained padding",
+            "DataError");
+        return nullptr;
+      }
+      auto d = dResult.unwrap();
+
+      if (d.length() != 32) {
+        auto message = fmt::format(
+            "The JWK's \"d\" member defines an octet string of length {} bytes but should be 32",
+            d.length());
+        DOMException::raise(cx, message, "DataError");
+        return nullptr;
+      }
+
+      // Create private key from raw bytes using OpenSSL
+      pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr,
+                                           reinterpret_cast<const unsigned char *>(d.data()),
+                                           d.length());
+      if (!pkey) {
+        DOMException::raise(cx, "Failed to create Ed25519 private key", "DataError");
+        return nullptr;
+      }
+    } else {
+      // Create public key from raw bytes
+      pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr,
+                                          reinterpret_cast<const unsigned char *>(x.data()),
+                                          x.length());
+      if (!pkey) {
+        DOMException::raise(cx, "Failed to create Ed25519 public key", "DataError");
+        return nullptr;
+      }
+    }
+
+    CryptoKeyType keyType = is_private ? CryptoKeyType::Private : CryptoKeyType::Public;
+    return CryptoKey::createEd25519(cx, this, pkey, keyType, extractable, usages);
+  }
+  case CryptoKeyFormat::Raw: {
+    // Raw format imports a public key (32 bytes)
+    auto keyBytes = std::get<std::span<uint8_t>>(key_data);
+
+    if (!usages.isEmpty() && !usages.canOnlyVerify()) {
+      DOMException::raise(cx, "Ed25519 raw keys only support 'verify' operations", "SyntaxError");
+      return nullptr;
+    }
+
+    if (keyBytes.size() != 32) {
+      DOMException::raise(cx, "Ed25519 raw public key must be 32 bytes", "DataError");
+      return nullptr;
+    }
+
+    EVP_PKEY *pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr,
+                                                   keyBytes.data(), keyBytes.size());
+    if (!pkey) {
+      DOMException::raise(cx, "Failed to create Ed25519 public key", "DataError");
+      return nullptr;
+    }
+
+    return CryptoKey::createEd25519(cx, this, pkey, CryptoKeyType::Public, extractable, usages);
+  }
+  case CryptoKeyFormat::Pkcs8: {
+    // PKCS8 imports a private key
+    if (!usages.isEmpty() && !usages.canOnlySign()) {
+      DOMException::raise(cx, "PKCS#8 private keys only support 'sign' operations", "SyntaxError");
+      return nullptr;
+    }
+
+    auto keyBytes = std::get<std::span<uint8_t>>(key_data);
+    const uint8_t *data = keyBytes.data();
+
+    EvpPkeyPtr pkey(d2i_PrivateKey(EVP_PKEY_ED25519, nullptr, &data, keyBytes.size()));
+    if (!pkey) {
+      DOMException::raise(cx, "Invalid PKCS#8 key data for Ed25519", "DataError");
+      return nullptr;
+    }
+
+    if (EVP_PKEY_id(pkey.get()) != EVP_PKEY_ED25519) {
+      DOMException::raise(cx, "PKCS#8 key is not an Ed25519 key", "DataError");
+      return nullptr;
+    }
+
+    return CryptoKey::createEd25519(cx, this, pkey.release(), CryptoKeyType::Private, extractable,
+                                    usages);
+  }
+  case CryptoKeyFormat::Spki: {
+    // SPKI imports a public key
+    if (!usages.isEmpty() && !usages.canOnlyVerify()) {
+      DOMException::raise(cx, "SPKI public keys only support 'verify' operations", "SyntaxError");
+      return nullptr;
+    }
+
+    auto keyBytes = std::get<std::span<uint8_t>>(key_data);
+    const uint8_t *data = keyBytes.data();
+
+    EvpPkeyPtr pkey(d2i_PUBKEY(nullptr, &data, keyBytes.size()));
+    if (!pkey) {
+      DOMException::raise(cx, "Invalid SPKI key data for Ed25519", "DataError");
+      return nullptr;
+    }
+
+    if (EVP_PKEY_id(pkey.get()) != EVP_PKEY_ED25519) {
+      DOMException::raise(cx, "SPKI key is not an Ed25519 key", "DataError");
+      return nullptr;
+    }
+
+    return CryptoKey::createEd25519(cx, this, pkey.release(), CryptoKeyType::Public, extractable,
+                                    usages);
+  }
+  }
+  return nullptr;
+}
+
+JSObject *CryptoAlgorithmEd25519_Import::importKey(JSContext *cx, CryptoKeyFormat format,
+                                                    JS::HandleValue key_data, bool extractable,
+                                                    CryptoKeyUsages usages) {
+  MOZ_ASSERT(cx);
+
+  KeyData data;
+  switch (format) {
+  case CryptoKeyFormat::Jwk: {
+    // For Ed25519, the kty is "OKP"
+    auto jwk = JsonWebKey::parse(cx, key_data, "OKP");
+    if (!jwk) {
+      return nullptr;
+    }
+    data = jwk.release();
+    break;
+  }
+  case CryptoKeyFormat::Raw:
+  case CryptoKeyFormat::Pkcs8:
+  case CryptoKeyFormat::Spki: {
+    std::optional<std::span<uint8_t>> buffer = value_to_buffer(cx, key_data, "");
+    if (!buffer.has_value()) {
+      return nullptr;
+    }
+    data = buffer.value();
+    break;
+  }
+  }
+
+  return this->importKey(cx, format, data, extractable, usages);
+}
+
+JSObject *CryptoAlgorithmEd25519_Import::toObject(JSContext *cx) const {
+  JS::RootedObject algorithm(cx, JS_NewPlainObject(cx));
+
+  auto *alg_name = JS_NewStringCopyZ(cx, this->name());
+  if (!alg_name) {
+    return nullptr;
+  }
+  JS::RootedValue name_val(cx, JS::StringValue(alg_name));
+  if (!JS_SetProperty(cx, algorithm, "name", name_val)) {
+    return nullptr;
+  }
+
+  return algorithm;
 }
 
 } // namespace builtins::web::crypto
