@@ -2588,100 +2588,6 @@ bool Response::json(JSContext *cx, unsigned argc, JS::Value *vp) {
 }
 
 
-/// https://fetch.spec.whatwg.org/#dom-response-clone
-bool Response::clone(JSContext *cx, unsigned argc, JS::Value *vp) {
-  METHOD_HEADER(0);
-
-  // Step 1: If this is unusable (i.e. disturbed or locked), throw a TypeError.
-  // We check body usability below when the body exists.
-
-  // Step 2: Let clonedResponse be a copy of this's response, except for its body.
-  RootedObject new_response(cx, create(cx));
-  if (!new_response) {
-    return false;
-  }
-
-  // Copy headers.
-  RootedValue cloned_headers_val(cx, JS::NullValue());
-  RootedObject headers(cx, RequestOrResponse::maybe_headers(self));
-  if (headers) {
-    RootedValue headers_val(cx, ObjectValue(*headers));
-    JSObject *cloned_headers = Headers::create(cx, headers_val, Headers::guard(headers));
-    if (!cloned_headers) {
-      return false;
-    }
-    cloned_headers_val.set(ObjectValue(*cloned_headers));
-  } else if (RequestOrResponse::maybe_handle(self)) {
-    auto handle = RequestOrResponse::headers_handle_clone(cx, self);
-    JSObject *cloned_headers =
-        Headers::create(cx, handle.release(),
-                        RequestOrResponse::is_incoming(self) ? Headers::HeadersGuard::Immutable
-                                                             : Headers::HeadersGuard::Response);
-    if (!cloned_headers) {
-      return false;
-    }
-    cloned_headers_val.set(ObjectValue(*cloned_headers));
-  }
-
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::Headers), cloned_headers_val);
-
-  // Copy URL via RequestOrResponse (URL slot is shared, not in Response::Slots).
-  RequestOrResponse::set_url(new_response, RequestOrResponse::url(self));
-
-  // Copy status.
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::Status),
-                  GetReservedSlot(self, static_cast<uint32_t>(Slots::Status)));
-
-  // Copy status message.
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::StatusMessage),
-                  GetReservedSlot(self, static_cast<uint32_t>(Slots::StatusMessage)));
-
-  // Copy type.
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::Type),
-                  GetReservedSlot(self, static_cast<uint32_t>(Slots::Type)));
-
-  // Copy redirected.
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::Redirected),
-                  GetReservedSlot(self, static_cast<uint32_t>(Slots::Redirected)));
-
-  // Copy aborted.
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::Aborted),
-                  GetReservedSlot(self, static_cast<uint32_t>(Slots::Aborted)));
-
-  // Step 3: If this's response's body is non-null, clone the body.
-  auto has_body = RequestOrResponse::has_body(self);
-  if (!has_body) {
-    args.rval().setObject(*new_response);
-    return true;
-  }
-
-  // Get (or create) the body stream, then tee it.
-  JS::RootedObject body_stream(cx, RequestOrResponse::body_stream(self));
-  if (!body_stream) {
-    body_stream = RequestOrResponse::create_body_stream(cx, self);
-    if (!body_stream) {
-      return false;
-    }
-  }
-
-  if (RequestOrResponse::body_unusable(cx, body_stream)) {
-    return api::throw_error(cx, FetchErrors::BodyStreamUnusable);
-  }
-
-  RootedObject self_body(cx);
-  RootedObject new_body(cx);
-  if (!ReadableStreamTee(cx, body_stream, &self_body, &new_body)) {
-    return false;
-  }
-
-  SetReservedSlot(self, static_cast<uint32_t>(Slots::BodyStream), ObjectValue(*self_body));
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::BodyStream), ObjectValue(*new_body));
-  SetReservedSlot(new_response, static_cast<uint32_t>(Slots::HasBody), JS::BooleanValue(true));
-
-  args.rval().setObject(*new_response);
-  return true;
-}
-
 const JSFunctionSpec Response::static_methods[] = {
     JS_FN("redirect", redirect, 1, JSPROP_ENUMERATE),
     JS_FN("json", json, 1, JSPROP_ENUMERATE),
@@ -2699,7 +2605,6 @@ const JSFunctionSpec Response::methods[] = {
     JS_FN("formData", bodyAll<RequestOrResponse::BodyReadResult::FormData>, 0, JSPROP_ENUMERATE),
     JS_FN("json", bodyAll<RequestOrResponse::BodyReadResult::JSON>, 0, JSPROP_ENUMERATE),
     JS_FN("text", bodyAll<RequestOrResponse::BodyReadResult::Text>, 0, JSPROP_ENUMERATE),
-    JS_FN("clone", Response::clone, 0, JSPROP_ENUMERATE),
     JS_FS_END,
 };
 
